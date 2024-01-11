@@ -1,0 +1,823 @@
+#include <ESP8266WiFi.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <BlynkSimpleEsp8266.h>
+#include <EEPROM.h>
+
+#define BLYNK_PRINT Serial
+//----------------------------- Replace with your network credentials ----------------------------------------------------------------------------------------
+#define BLYNK_TEMPLATE_ID "TMPL6QuPVJoXT"
+#define BLYNK_TEMPLATE_NAME "Hidroponik Monitoring"
+#define BLYNK_AUTH_TOKEN "Zx2wNpfgMsZRt_q7stPXhDLkGYagN47v"
+
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "smart";
+char pass[] = "smartcloud";
+
+BlynkTimer timer;
+//Define NTP Client to get time
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org");
+//Define EEPROM Const
+#define EEPROM_SIZE 12
+
+//Week Days
+String weekDays[7]={"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+String months[12]={"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
+//----------------------------- init for fuzzy ---------------------------------------------------------------------------------------------------------------------//
+float temp;
+float nutrisi[4];
+float air[3];
+float rule[3][4];
+float rule1, rule2, rule3, rule4, rule5, rule6, rule7, rule8, rule9, rule10, rule11, rule12;
+float hasilSC, hasilC, hasilS, hasilL;
+float output1, output2, hasil_output;
+float SCepat, Cepat, Sedang, Lama;
+float averageVoltage = 0; 
+float tdsValue = 0;
+float temperature = 23; 
+float z = 0;
+float jarak = 0;
+float delayNutrisi;
+
+int hasil_output2;
+//----------------------------- ultrasonic sensor ---------------------------------------------------------------------------------------------------------------
+#define triggerPin  15                          //connect to D8
+#define echoPin     13                          //connect to D7
+//----------------------------- dht sensor -------------------------------------------------------------------------------------------------------------------------//
+#include "DHT.h"
+#define DHTPIN 12                               //connect to D6
+#define DHTTYPE DHT22
+//----------------------------- tds sensor --------------------------------------------------------------------------------------------------------------------------------//
+#define TdsSensorPin A0
+#define VREF 3.3                                // analog reference voltage(Volt) of the ADC
+#define SCOUNT 30                               // sum of sample point
+
+//-----------------------------define relay pin as output ----------------------------------------------------------------------------------------------------------------//
+#define KIPASPIN 2                              //connect to D4
+#define POMPA1   0                              //connect to D3
+#define POMPA2   4                              //conncet to D2
+#define NUTRISI  5                              //connect to D1
+//----------------------------- ultrasonic sensor -------------------------------------------------------------------------------------------------------------------------//
+
+DHT dht(DHTPIN, DHTTYPE);
+
+int analogBuffer[SCOUNT];                       // store the analog value in the array, read from ADC
+int analogBufferTemp[SCOUNT];
+int analogBufferIndex = 0;
+int copyIndex = 0;
+
+
+// median filtering algorithm
+int getMedianNum(int bArray[], int iFilterLen){
+  int bTab[iFilterLen];
+  for (byte i = 0; i<iFilterLen; i++)
+  bTab[i] = bArray[i];
+  int i, j, bTemp;
+  for (j = 0; j < iFilterLen - 1; j++) {
+    for (i = 0; i < iFilterLen - j - 1; i++) {
+      if (bTab[i] > bTab[i + 1]) {
+        bTemp = bTab[i];
+        bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+      }
+    }
+  }
+  if ((iFilterLen & 1) > 0){
+    bTemp = bTab[(iFilterLen - 1) / 2];
+  }
+  else {
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+  }
+  return bTemp;
+}
+
+void setup(){
+  Serial.begin(115200);
+  Blynk.begin(auth, ssid, pass, "blynk.cloud", 8080);
+  timer.setInterval(100L, sendSensor);
+  //Connect to Wi-Fi
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED){
+    delay(500);
+    Serial.print(".");
+  }
+  pinMode(triggerPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(TdsSensorPin,INPUT);
+  pinMode(DHTPIN, INPUT);
+  pinMode(KIPASPIN, OUTPUT);
+  pinMode(POMPA1, OUTPUT);
+  pinMode(POMPA2, OUTPUT);
+  pinMode(NUTRISI, OUTPUT);
+  dht.begin();
+  timeClient.begin();
+  timeClient.setTimeOffset(28800);
+}
+
+void sendSensor(){
+  timeClient.update();
+
+  time_t epochTime = timeClient.getEpochTime();
+  String formattedTime = timeClient.getFormattedTime();
+  Serial.print("Formatted Time: ");
+  Serial.println(formattedTime);
+  int currentHour = timeClient.getHours();
+  int currentMinute = timeClient.getMinutes();
+  int currentSecond = timeClient.getSeconds();
+  String weekDay = weekDays[timeClient.getDay()];
+
+  //Get a time structure
+  struct tm *ptm = gmtime ((time_t *)&epochTime); 
+  int monthDay = ptm->tm_mday;
+  int currentMonth = ptm->tm_mon+1;
+  String currentMonthName = months[currentMonth-1];
+  int currentYear = ptm->tm_year+1900;
+
+  //Print complete date:
+  String currentDate = String(currentYear) + "-" + String(currentMonth) + "-" + String(monthDay);
+  Serial.print("Current date: ");
+  Serial.println(currentDate);
+
+  //----------------------------------- INITIATE ULTRASONIC SENSOR -------------------------------------------------------------------------------------------//
+  long duration, jarak;
+  digitalWrite(triggerPin, LOW);
+  delayMicroseconds(2); 
+  digitalWrite(triggerPin, HIGH);
+  delayMicroseconds(10); 
+  digitalWrite(triggerPin, LOW);
+  duration = pulseIn(echoPin, HIGH);
+  jarak = (duration/2) / 29.1;
+  Serial.println("jarak :");
+  Serial.print(jarak);
+  Serial.println(" cm");
+  //------------------------------------ INITIATE TDS SENSOR --------------------------------------------------------------------------------------------------//
+  static unsigned long analogSampleTimepoint = millis();
+  if(millis()-analogSampleTimepoint > 40U){                         //every 40 milliseconds,read the analog value from the ADC
+    analogSampleTimepoint = millis();
+    analogBuffer[analogBufferIndex] = analogRead(TdsSensorPin);    //read the analog value and store into the buffer
+    analogBufferIndex++;
+    if(analogBufferIndex == SCOUNT){ 
+      analogBufferIndex = 0;
+    }
+  }   
+  
+  static unsigned long printTimepoint = millis();
+  if(millis()-printTimepoint > 800U){
+    printTimepoint = millis();
+    for(copyIndex=0; copyIndex<SCOUNT; copyIndex++){
+      analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+      
+      // read the analog value more stable by the median filtering algorithm, and convert to voltage value
+      averageVoltage = getMedianNum(analogBufferTemp,SCOUNT) * (float)VREF / 1024.0;
+      
+      //temperature compensation formula: fFinalResult(25^C) = fFinalResult(current)/(1.0+0.02*(fTP-25.0)); 
+      float compensationCoefficient = 1.0+0.02*(temperature-25.0);
+      //temperature compensation
+      float compensationVoltage=averageVoltage/compensationCoefficient;
+      
+      //convert voltage value to tds value
+      tdsValue=(133.42*compensationVoltage*compensationVoltage*compensationVoltage - 255.86*compensationVoltage*compensationVoltage + 857.39*compensationVoltage)*0.5;
+      
+      //Serial.print("voltage:");
+      //Serial.print(averageVoltage,2);
+      //Serial.print("V   ");
+      Serial.print("TDS Value:");
+      Serial.print(tdsValue,0);
+      Serial.println("ppm");
+    }
+  }
+    //----------------------------------- INITIATES DHT SENSOR --------------------------------------------------------------------------------------------------
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    Serial.print("Humidity: ");
+    Serial.print(h);
+    Serial.print("\n");
+    Serial.print("  Temperature: ");
+    Serial.print(t);
+    Serial.print("°C ");
+
+    //------------------------------------ PENJADWALAN BERDASARKAN TANGGAL -----------------------------------------------------------------------------------------
+
+    if (currentDate = 2023-6-1 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-2 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH); 
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-3 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH); 
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-4 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-5 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-6 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-7 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-8 && tdsValue <=500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-9 && tdsValue <=700 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-10 && tdsValue <=700 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-11 && tdsValue <=700 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-12 && tdsValue <=700 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-13 && tdsValue <=700 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-14 && tdsValue <=700 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-15 && tdsValue <=800 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-16 && tdsValue <=800 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-17 && tdsValue <=800 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-18 && tdsValue <=800 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-19 && tdsValue <=800 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-20 && tdsValue <=800 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-21 && tdsValue <=800 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-22 && tdsValue <=900 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-23 && tdsValue <=900 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-24 && tdsValue <=900 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-25 && tdsValue <=900 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-26 && tdsValue <=900 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-27 && tdsValue <=900 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-28 && tdsValue <=900 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-29 && tdsValue <=1000 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-6-30 && tdsValue <=1000 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-1 && tdsValue <=1000 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-2 && tdsValue <=1000 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-3 && tdsValue <=1000 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }                    
+    else if (currentDate = 2023-7-4 && tdsValue <=1000 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-5 && tdsValue <=1000 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-6 && tdsValue <=1200 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-7 && tdsValue <=1200 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-8 && tdsValue <=1200 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-9 && tdsValue <=1200 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-10 && tdsValue <=1200 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-11 && tdsValue <=1200 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-12 && tdsValue <=1200 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-13 && tdsValue <=1500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-14 && tdsValue <=1500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-15 && tdsValue <=1500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-16 && tdsValue <=1500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-17 && tdsValue <=1500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-18 && tdsValue <=1500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else if (currentDate = 2023-7-19 && tdsValue <=1500 && jarak <= 15 && t>=25){
+      digitalWrite(POMPA1, HIGH);
+      digitalWrite(POMPA2, HIGH);
+      digitalWrite(NUTRISI, HIGH);
+      digitalWrite(KIPASPIN, HIGH);
+      Blynk.virtualWrite(V3, HIGH);
+    }
+    else{
+      digitalWrite(POMPA1, LOW);
+      digitalWrite(POMPA2, LOW);
+      digitalWrite(NUTRISI, LOW);
+      digitalWrite(KIPASPIN, LOW);
+      Blynk.virtualWrite(V3, LOW);
+    }
+    //-----------------------------------------------PENGIRIMAN DATA SENSOR --------------------------------------------------------------
+      Blynk.virtualWrite(V0, tdsValue);
+      Blynk.virtualWrite(V1, jarak);
+      Blynk.virtualWrite(V2, t);
+    //-----------------------------------------------KONTROL RELAY VIA BLYNK UNTUK PENJADWALAN -------------------------------------------
+      Blynk.virtualWrite(V3, NUTRISI);
+}
+
+void FuzzyfikasiAir()
+{
+  //untuk kondisi rendah
+  if(jarak <= 10)
+  {
+    air[0] = 1;
+  }
+  else if(jarak > 10 && jarak <= 15)
+  {
+    air[0] = (15 - jarak)/(15 - 10);
+  }
+  else
+  {
+    air[0] = 0;
+  }
+
+  //untuk kondisi normal
+  if(jarak <= 10)
+  {
+    air[1] = 0;
+  }
+  else if(jarak > 10 && jarak<= 15)
+  {
+    air[1] = (jarak - 10)/(15 - 10);
+  }
+  else if(jarak > 15 && jarak <= 20)
+  {
+    air[1] = (20 - jarak)/(20 - 15);
+  }
+  else
+  {
+    air[1] = 0;
+  }
+
+  //untuk kondisi tingi
+  if(jarak <= 20)
+  {
+    air[2] = 0;
+  }
+  else if(jarak > 20 && jarak <= 30)
+  {
+    air[2] = (jarak - 20)/(30 - 20);
+  }
+  else
+  {
+    air[2] = 1;
+  }
+
+  Serial.print("Rendah = ");
+  Serial.print(air[0]);
+  Serial.print("Normal = ");
+  Serial.print(air[1]);
+  Serial.print("Tinggi = ");
+  Serial.print(air[2]);
+}
+void FuzzyfikasiTDS()
+{
+  //untuk kondisi sangat kurang
+  if(tdsValue <= 450)
+  {
+    nutrisi[0] = 1;
+  }
+  else if(tdsValue > 450 && tdsValue <= 550)
+  {
+    nutrisi[0] = (500 - tdsValue)/(550 - 450);
+  }
+  else
+  {
+    nutrisi[0] = 0;
+  }
+
+  //untuk kondisi kurang
+  if(tdsValue <= 450)
+  {
+    nutrisi[1] = 0;
+  }
+  else if(tdsValue > 450 && tdsValue <= 550)
+  {
+    nutrisi[1] = (tdsValue -450)/(550-450);
+  }
+  else if(tdsValue > 550 && tdsValue <= 650)
+  {
+    nutrisi[1] = (650 - tdsValue)/(650-550);
+  }
+  else
+  {
+    nutrisi[1] = 0;
+  }
+
+  //untuk kondisi normal
+  if(tdsValue < 550)
+  {
+    nutrisi[2] = 0;
+  }
+  else if(tdsValue > 550 && tdsValue <= 650)
+  {
+    nutrisi[2] = (tdsValue - 550)/(650-550);
+  }
+  else if(tdsValue > 650 && tdsValue <= 750)
+  {
+    nutrisi[2] = (750 - tdsValue)/(750-650);
+  }
+  else
+  {
+    nutrisi[2] = 0;
+  }
+
+  //untuk kondisi tinggi
+  if (tdsValue <= 650) 
+  { 
+    nutrisi [3] = 0; 
+  } 
+  else if (tdsValue > 650 && tdsValue <= 750) 
+  { 
+    nutrisi [3] = (tdsValue - 650) / (750 - 650); 
+  } 
+  else 
+  { 
+    nutrisi [3] = 1; 
+  } 
+  
+  Serial.print(" Nutrisi Sangat Kurang = "); 
+  Serial.print(nutrisi[0]); 
+  Serial.print(" Nutrisi Kurang = "); 
+  Serial.print(nutrisi[1]); 
+  Serial.print(" Nutrisi Normal = "); 
+  Serial.print(nutrisi[2]); 
+  Serial.print(" Nutrisi Tinggi = "); 
+  Serial.println(nutrisi[3]);
+}
+
+//RuleBase 
+void RuleBase() 
+{ 
+ int i, j; 
+ int no = 1; 
+ for ( i = 0; i <= 3; i = i + 1) 
+ { 
+  for ( j = 0; j <= 2; j = j + 1) 
+  { 
+   temp = min(nutrisi[i], air[j]);
+   rule [i][j] = temp; 
+   Serial.print("Aturan ke-"); 
+   Serial.print(no++); 
+   Serial.print(" : "); 
+   Serial.println( rule [i][j]); 
+  } 
+ } 
+ rule1 = rule[0][0]; // (Rendah,Sangat Kurang = Lama) 
+ rule2 = rule[0][1]; // (Normal,Sangat Kurang = Lama) 
+ rule3 = rule[0][2]; // (Tinggi,Sangat Kurang = Cepat)
+  
+ rule4 = rule[1][0]; // (Rendah,Kurang = Lama) 
+ rule5 = rule[1][1]; // (Normal,Kurang = Sedang) 
+ rule6 = rule[1][2]; // (Tinggi,Kurang = Sangat Cepat)
+  
+ rule7 = rule[2][0]; // (Rendah,Normal = Sedang) 
+ rule8 = rule[2][1]; // (Normal,Normal = Cepat) 
+ rule9 = rule[2][2]; // (Tinggi,Normal = Sangat Cepat)
+  
+ rule10 = rule[3][0]; // (Rendah,Tinggi = Sedang) 
+ rule11 = rule[3][1]; // (Normal,Tinggi = Cepat) 
+ rule12 = rule[3][2]; // (Tinggi,Tinggi = Sangat Cepat) 
+}
+
+void Inferensi() 
+{ 
+ SCepat = max((max(rule6, rule9)), rule12);//SCepat = z1 
+ Cepat = max((max(rule3, rule8)), rule11);//Cepat = z2 
+ Sedang = max((max(rule5, rule7)), rule10);//Sedang = z3 
+ Lama = max((max(rule1, rule2)), rule4);//Lama = z4
+  
+ Serial.print(" Sangat Cepat = "); 
+ Serial.print(SCepat); 
+ Serial.print(" Cepat = "); 
+ Serial.print(Cepat); 
+ Serial.print(" Sedang = "); 
+ Serial.print(Sedang); 
+ Serial.print(" Lama = ");
+ Serial.println(Lama); 
+}
+
+void Defuzzyfikasi() 
+{ 
+ //float hasilSC, hasilC, hasilS, hasilL; 
+ output1 = ((rule1*Lama) + (rule2*Lama) + (rule3*Cepat) + (rule4*Lama) +  (rule5*Sedang) + (rule6*SCepat) + (rule7*Sedang) + (rule8*Cepat) + (rule9*SCepat) + (rule10*Sedang) + (rule11*Cepat) +  (rule12*SCepat)); 
+ output2 = ((rule1 + rule2 + rule3 + rule4 + rule5 + rule6 + rule7 + rule8 + rule9 + rule10 + rule11 + rule12)); 
+ hasil_output = (output1 / output2); 
+ delayNutrisi = (hasil_output*60000); 
+ 
+ if (hasil_output >= 0.00 && hasil_output <= 1.00)
+ { 
+  digitalWrite(POMPA1,HIGH); 
+  delay(hasil_output); 
+  Serial.print("Defuzzyfikasi : "); 
+  Serial.print(hasil_output); 
+  Serial.println(" menit adalah Sangat Cepat"); 
+ } 
+ else if (hasil_output > 1.00 && hasil_output <= 2.00)
+ { 
+  digitalWrite(POMPA1,HIGH); 
+  delay(hasil_output); 
+  Serial.print("Defuzzyfikasi : "); 
+  Serial.print(hasil_output); 
+  Serial.println(" menit adalah Cepat"); 
+ } 
+ else if (hasil_output > 2.00 && hasil_output <= 3.00)
+ { 
+  digitalWrite(POMPA1,HIGH); 
+  delay(hasil_output); 
+  Serial.print("Defuzzyfikasi : "); 
+  Serial.print(hasil_output); 
+  Serial.println(" menit adalah Sedang"); 
+ }
+ else if (hasil_output > 3.00 && hasil_output <= 4.00)
+ { 
+  digitalWrite(POMPA1,HIGH); 
+  delay(hasil_output); 
+  Serial.print("Defuzzyfikasi : "); 
+  Serial.print(hasil_output); 
+  Serial.println(" menit adalah Lama"); 
+ } 
+ Serial.print("Lama Pompa Nutrisi Menyala adalah "); 
+ Serial.print(delayNutrisi); 
+ Serial.println(" detik"); 
+}
+
+void eeprom(){
+  Serial.println(F("Initialize EEPROM SYSTEM"));
+  //Init EEPROM
+  EEPROM.begin(EEPROM_SIZE);
+
+  //Write data into eeprom
+  int address = 0;
+  int boardId = 18;
+  EEPROM.put(address, boardId);
+  address += sizeof(boardId); //update address value
+
+  float param = 26.5;
+  EEPROM.put(address, param);
+  EEPROM.commit();
+
+  //Read data from eeprom
+  address = 0;
+  int readId;
+  EEPROM.get(address, readId);
+  Serial.print("Read Id = ");
+  Serial.println(readId);
+  address += sizeof(readId); //update address value
+
+  EEPROM.get(address, tdsValue); //readParam=EEPROM.readFloat(address);
+  Serial.print("Read param = ");
+  Serial.println(tdsValue);
+
+  EEPROM.end();
+}
+
+void loop()
+{
+  Blynk.run();
+  timer.run();
+}
